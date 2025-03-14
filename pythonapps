@@ -1,0 +1,783 @@
+
+
+import tkinter as tk
+import os
+import sys
+from tkinter import ttk,Menu,filedialog
+from PIL import Image, ImageTk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.patches import Wedge
+from matplotlib.colors import LinearSegmentedColormap
+import serial
+import serial.tools.list_ports
+import time
+import threading  # Import threading untuk menjalankan komunikasi serial
+from queue import Queue
+import datetime
+import random
+fig = None
+ax = None
+figure_canvas = None
+value = 0
+valuefloat =0
+ph_values = 0
+voltage_value = 0
+values = [0, 0, 0]
+labels = ['PH', 'Voltage (V)', 'Suhu (°C)']
+colors1 = ['#00E0FF', '#FF3D00', '#FFEA00']  # Bright cyan, neon red, neon yellow
+colors2 = ['#00FFAB', '#D5006D', '#FFEA00']  # Neon green, neon pink, neon yellow
+dates = []
+ph_values = []
+temperatures = []
+humidities = []
+categories = []
+wedges = []
+voltage_values=[]
+status = False
+value_texts = []
+ports = serial.tools.list_ports.comports()
+plt.rcParams['figure.max_open_warning'] = 0
+data_list = []
+# Fungsi untuk membaca data dari Arduino pada thread terpisah
+image_path = os.path.join(os.getcwd(), 'logoum.png')
+def on_close ():
+    root.destroy()
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+def show_splash_screen():
+    # Create splash window
+    splash_root = tk.Tk()
+    splash_root.overrideredirect(True)  # Remove window borders
+    splash_root.geometry("1366x705")  # Position the splash screen in the middle
+    
+    # Load splash image (assuming it's in the same directory as the script)
+    splash_image = ImageTk.PhotoImage(Image.open(resource_path("splash_image.jpg")))  # Replace with actual image path
+    splash_label = tk.Label(splash_root, image=splash_image)
+    splash_label.pack()
+
+    # Close splash screen after 3 seconds and open main window
+    splash_root.after(3000, splash_root.destroy)
+    
+    # Run splash screen
+    splash_root.mainloop()
+
+# Run splash screen before loading main window
+show_splash_screen()
+
+def read_serial_data(queue):
+    global status
+    while True:  # Loop ini akan terus berjalan
+        ports = serial.tools.list_ports.comports()
+        arduino_port = None
+
+        for port in ports:
+            print(f"Found port: {port.device} - {port.description}")
+            if 'Arduino' in port.description or 'CH340' in port.description:
+                arduino_port = port.device
+                break
+
+        if arduino_port is None:
+            print("Arduino not found. Checking again in 5 seconds...")
+            status = False  # Tidak terhubung ke Arduino
+            time.sleep(5)  # Tunggu sebelum memeriksa lagi
+        else:
+            print(f"Connecting to Arduino on port: {arduino_port}")
+            
+            try:
+                ser = serial.Serial(arduino_port, 9600, timeout=1)
+                time.sleep(2)  # Menunggu Arduino siap
+
+                # Kirim data ke Arduino
+                ser.write(b'Hello Arduino!\n')
+                status = True  # Terhubung ke Arduino
+                
+                # Loop untuk terus membaca data
+                while True:
+                    if ser.in_waiting > 0:
+                        line = ser.readline().decode('utf-8').rstrip()
+                        queue.put(line)  # Masukkan data ke queue
+                        print(f"Received: {line}")
+                        # Tetap menjaga status jika data diterima
+                    else:
+                        # Jika tidak ada data diterima, periksa kembali koneksi
+                        break
+
+            except serial.SerialException as e:
+                print(f"Serial error: {e}")
+                status = False  # Terputus jika ada error
+            except Exception as e:
+                print(f"Error: {e}")
+                status = False  # Terputus jika ada error
+            finally:
+                if ser.is_open:
+                    ser.close()
+                    
+
+# Fungsi untuk memperbarui UI dengan data dari Arduino
+def update_ui_from_serial():
+    global value, valuefloat, ph_values, voltage_values,ph_value, voltage_value
+
+    if not data_queue.empty():
+        line = data_queue.get()
+        try:
+            # Pisahkan data berdasarkan koma
+            data_parts = line.split(',')
+            if len(data_parts) == 2:  # Pastikan ada dua bagian (pH dan voltage)
+                ph_value= float(data_parts[0])  # Data pertama adalah pH
+                voltage_value = float(data_parts[1])  # Data kedua adalah voltage
+
+                value = int(ph_value)  # Jika masih ingin menyimpan sebagai integer
+                values[0] = value
+                values[1] = int(voltage_value)
+                values[2] = 0
+                if value<15 :
+                    valuefloat = ph_value
+                voltage_values.append(voltage_value)
+                if value<15 :
+                    ph_values.append(ph_value)
+
+                # Perbarui grafik, gauge, atau UI lainnya dengan data pH dan voltage
+                print(f"Updated pH: {line}")
+            else:
+                print(f"Unexpected data format: {line}")
+
+        except ValueError:
+            print(f"Invalid data received: {line}")
+    
+    root.after(1000, update_ui_from_serial)  # Cek data serial lagi setelah 1000ms
+
+#update plot 
+def update_plots():
+    # Update plot pH
+    if 'fig_ph' in globals():
+        plt.close(fig_ph)
+    if len(ph_values) > 0:
+        # Buat DataFrame dari seluruh data ph_values
+        df_ph = pd.DataFrame({'Ph Values': ph_values})
+
+        ax_ph.clear()  # Bersihkan plot pH sebelumnya
+
+        # Update plot pH dengan data terbaru
+        df_ph.plot(marker='o', color='#08F7FE', ax=ax_ph)
+
+        # Mengatur sumbu dan gaya visual
+        ax_ph.fill_between(x=df_ph.index,
+                           y1=df_ph['Ph Values'].values,
+                           y2=[0] * len(df_ph),
+                           color='#08F7FE',
+                           alpha=0.1)
+        ax_ph.grid(color='#2A3459')
+        ax_ph.set_xlim([ax_ph.get_xlim()[0] - 0.2, ax_ph.get_xlim()[1] + 0.2])
+        ax_ph.set_ylim(0)
+
+        # Atur judul dan label dengan fontsize lebih kecil
+        ax_ph.set_title('pH Values', fontsize=10)
+        ax_ph.set_xlabel('Index', fontsize=8)
+        ax_ph.set_ylabel('pH', fontsize=8)
+        ax_ph.tick_params(axis='both', which='major', labelsize=7)
+
+        figure_canvas_ph.draw()  # Gambar ulang canvas pH
+
+    # Update plot voltage
+    if 'fig_voltage' in globals():
+        plt.close(fig_voltage)
+    if len(voltage_values) > 0:
+        # Buat DataFrame dari seluruh data voltage_values
+        df_voltage = pd.DataFrame({'Voltage Values': voltage_values})
+
+        ax_voltage.clear()  # Bersihkan plot voltage sebelumnya
+
+        # Update plot voltage dengan data terbaru
+        df_voltage.plot(marker='o', color='#FE53BB', ax=ax_voltage)
+
+        # Mengatur sumbu dan gaya visual
+        ax_voltage.fill_between(x=df_voltage.index,
+                                y1=df_voltage['Voltage Values'].values,
+                                y2=[0] * len(df_voltage),
+                                color='#FE53BB',
+                                alpha=0.1)
+        ax_voltage.grid(color='#2A3459')
+        ax_voltage.set_xlim([ax_voltage.get_xlim()[0] - 0.2, ax_voltage.get_xlim()[1] + 0.2])
+        ax_voltage.set_ylim(0)
+
+        # Atur judul dan label dengan fontsize lebih kecil
+        ax_voltage.set_title('Voltage Values', fontsize=10)
+        ax_voltage.set_xlabel('Index', fontsize=8)
+        ax_voltage.set_ylabel('Voltage', fontsize=8)
+        ax_voltage.tick_params(axis='both', which='major', labelsize=7)
+
+        figure_canvas_voltage.draw()  # Gambar ulang canvas voltage
+
+    # Jalankan lagi fungsi ini setelah 1 detik untuk update terus-menerus
+    root.after(1000, update_plots)
+
+
+# Fungsi untuk membuat kotak dengan sudut melengkung
+def rounded_rectangle(canvas, x1, y1, x2, y2, radius=25, **kwargs):
+    points = [x1+radius, y1,
+              x1+radius, y1,
+              x2-radius, y1,
+              x2-radius, y1,
+              x2, y1,
+              x2, y1+radius,
+              x2, y1+radius,
+              x2, y2-radius,
+              x2, y2-radius,
+              x2, y2,
+              x2-radius, y2,
+              x2-radius, y2,
+              x1+radius, y2,
+              x1+radius, y2,
+              x1, y2,
+              x1, y2-radius,
+              x1, y2-radius,
+              x1, y1+radius,
+              x1, y1+radius,
+              x1, y1]
+    return canvas.create_polygon(points, **kwargs, smooth=True)
+
+# Fungsi untuk membuat grafik dengan matplotlib (dibuat sekali)
+def create_plot_ph():
+    global fig_ph, ax_ph  
+    plt.style.use("dark_background")
+
+    # Atur style dan warna
+    for param in ['text.color', 'axes.labelcolor', 'xtick.color', 'ytick.color']:
+        plt.rcParams[param] = '0.9'  # very light grey
+
+    for param in ['figure.facecolor', 'axes.facecolor', 'savefig.facecolor']:
+        plt.rcParams[param] = '#172144'  # bluish dark grey
+
+    colors = ['#08F7FE']  # Warna teal untuk pH
+
+    # Membuat DataFrame untuk ph_values
+    df_ph = pd.DataFrame({'Ph Values': ph_values})
+
+    # Membuat figure dan axes
+    fig_ph, ax_ph = plt.subplots()
+
+    # Plot data pH
+    df_ph.plot(marker='o', color=colors, ax=ax_ph)
+
+    # Isi area di bawah garis
+    ax_ph.fill_between(x=df_ph.index,
+                       y1=df_ph['Ph Values'].values,
+                       y2=[0] * len(df_ph),
+                       color=colors[0],
+                       alpha=0.1)
+
+    # Mengatur grid dan batas x
+    ax_ph.grid(color='#2A3459')  # Aktifkan grid
+    ax_ph.set_xlim([ax_ph.get_xlim()[0] - 0.2, ax_ph.get_xlim()[1] + 0.2])
+
+    # Atur judul dan label dengan fontsize lebih kecil
+    ax_ph.set_title('pH Values', fontsize=10)  # Judul dengan fontsize 10
+    ax_ph.set_xlabel('Index', fontsize=8)  # Label sumbu X dengan fontsize 8
+    ax_ph.set_ylabel('pH', fontsize=8)  # Label sumbu Y dengan fontsize 8
+
+    # Atur ukuran font pada tick labels (angka di sumbu X dan Y)
+    ax_ph.tick_params(axis='both', which='major', labelsize=7)  # Font ukuran 7 untuk tick labels
+
+    return fig_ph
+
+
+def create_plot_voltage():
+    global fig_voltage, ax_voltage  
+    plt.style.use("dark_background")
+
+    # Atur style dan warna
+    for param in ['text.color', 'axes.labelcolor', 'xtick.color', 'ytick.color']:
+        plt.rcParams[param] = '0.9'  # very light grey
+
+    for param in ['figure.facecolor', 'axes.facecolor', 'savefig.facecolor']:
+        plt.rcParams[param] = '#172144'  # bluish dark grey
+
+    colors = ['#FE53BB']  # Warna pink untuk voltage
+
+    # Membuat DataFrame untuk voltage_values
+    df_voltage = pd.DataFrame({'Voltage Values': voltage_values})
+
+    # Membuat figure dan axes
+    fig_voltage, ax_voltage = plt.subplots()
+
+    # Plot data voltage
+    df_voltage.plot(marker='o', color=colors, ax=ax_voltage)
+
+    # Isi area di bawah garis
+    ax_voltage.fill_between(x=df_voltage.index,
+                            y1=df_voltage['Voltage Values'].values,
+                            y2=[0] * len(df_voltage),
+                            color=colors[0],
+                            alpha=0.1)
+
+    # Mengatur grid dan batas x
+    ax_voltage.grid(color='#2A3459')  # Aktifkan grid
+    ax_voltage.set_xlim([ax_voltage.get_xlim()[0] - 0.2, ax_voltage.get_xlim()[1] + 0.2])
+
+    # Atur judul dan label dengan fontsize lebih kecil
+    ax_voltage.set_title('Voltage Values', fontsize=8)  # Judul dengan fontsize 10
+    ax_voltage.set_xlabel(' ', fontsize=8)  # Label sumbu X dengan fontsize 8
+    ax_voltage.set_ylabel('Voltage', fontsize=8)  # Label sumbu Y dengan fontsize 8
+
+    # Atur ukuran font pada tick labels (angka di sumbu X dan Y)
+    ax_voltage.tick_params(axis='both', which='major', labelsize=7)  # Font ukuran 7 untuk tick labels
+
+    return fig_voltage
+
+
+
+def create_gauge(ax, value, label, color1, color2, max_value=100):
+    ax.set_aspect('equal')
+
+    # Background circle
+    circle_bg = Wedge((0.5, 0.5), 0.4, 0, 360, width=0.1, facecolor='#3c3c57')
+    ax.add_patch(circle_bg)
+
+    # Draw glow effect
+    for i in range(3):
+        glow_circle = Wedge((0.5, 0.5), 0.4 + i * 0.05, -90, 360, width=0.1, facecolor=color1, alpha=0.1/(i + 1))
+        ax.add_patch(glow_circle)
+
+    # Calculate wedge angle
+    wedge_angle = 360 * value / max_value
+    if value == 0:
+        wedge_angle = 1
+
+    cmap = LinearSegmentedColormap.from_list("my_cmap", [color1, color2])
+    wedge = Wedge((0.5, 0.5), 0.4, -90, wedge_angle - 90, width=0.1, facecolor=cmap(value / max_value))
+    ax.add_patch(wedge)
+
+    # Simpan wedge untuk update nanti
+    wedges.append(wedge)
+
+    # Tambah teks nilai
+    value_text = ax.text(0.5, 0.5, f"{value:.0f}", ha='center', va='center', fontsize=25, color='white')
+    ax.text(0.5, 0, label, ha='center', va='center', fontsize=10, color='#CCCCCC')
+    
+    # Simpan teks untuk update nanti
+    value_texts.append(value_text)
+
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis('off')
+
+# Fungsi untuk membuat gauge
+def plot_gauges(canvas_frame, values, labels, colors1, colors2):
+    fig, axs = plt.subplots(1, len(values), figsize=(6, 2), constrained_layout=True)
+    fig.patch.set_facecolor('#172144')
+
+    for ax, value, label, color1, color2 in zip(axs, values, labels, colors1, colors2):
+        create_gauge(ax, value, label, color1, color2)
+
+    return fig
+
+# Fungsi untuk update hanya bar dan nilai gauge
+def update_gauges(new_values):
+    for wedge, value_text, new_value, color1, color2 in zip(wedges, value_texts, new_values, colors1, colors2):
+        wedge_angle = 360 * new_value / 100
+        if new_value == 0:
+            wedge_angle = 1
+
+        cmap = LinearSegmentedColormap.from_list("my_cmap", [color1, color2])
+        wedge.set_theta2(wedge_angle - 90)  # Update ukuran wedge
+        wedge.set_facecolor(cmap(new_value / 100))  # Update warna wedge
+
+        value_text.set_text(f"{new_value:.0f}")  # Update teks nilai
+
+    canvas_circle.draw()  # Redraw the canvas
+
+# Fungsi simulasi update nilai
+def simulate_update():
+    
+    update_gauges(values)
+    root.after(1000, simulate_update)  # Panggil lagi setelah 1 detik
+
+
+#update gauge pelangi
+def update_gauge(gauge_frame, delay=1000):
+    global value  # Ambil nilai pH dari variabel global
+    
+    # Hapus gambar lama di canvas
+    for widget in gauge_frame.winfo_children():
+        widget.destroy()
+    
+    # Plot gauge baru dengan nilai pH dari variabel global value
+    gauge_fig = plot_custom_ph_gauge(value)  # Set pH value here
+    
+    # Convert matplotlib figure ke Tkinter canvas
+    gauge_canvas = FigureCanvasTkAgg(gauge_fig, master=gauge_frame)
+    gauge_canvas.draw()
+    
+    # Tampilkan canvas di frame
+    gauge_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    
+    # Panggil kembali fungsi ini setelah `delay` ms untuk update otomatis
+    gauge_frame.after(delay, update_gauge, gauge_frame, delay)
+
+# Contoh pemanggilan:
+# update_gauge(gauge_frame)
+
+# Fungsi untuk membuat pH gauge
+def plot_custom_ph_gauge(ph_value):
+    global status
+    
+    start_angle = -90
+    end_angle = 90
+    num_sections = 15
+
+    fig, ax = plt.subplots(figsize=(3, 1), subplot_kw={'projection': 'polar'})
+    fig.subplots_adjust(left=0.05, right=0.95, top=0.85, bottom=0.05)
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+
+    angles = np.linspace(np.deg2rad(start_angle), np.deg2rad(end_angle), num_sections + 1)
+
+    colors = ['#FF0000', '#FF4500', '#FF6347', '#FF7F50', '#FFD700', '#ADFF2F', '#7CFC00', '#32CD32', '#00FA9A', 
+              '#00CED1', '#4682B4', '#4169E1', '#0000CD', '#483D8B', '#6A5ACD']
+
+    for i in range(num_sections):
+        ax.barh(1, width=angles[i + 1] - angles[i], left=angles[i], height=0.5, color=colors[i])
+
+    for i in range(num_sections):
+        if i == 7:
+            ax.text(angles[i] + (angles[i + 1] - angles[i]) / 2, 1.1, str(i), ha='center', va='center', fontsize=12, fontweight='bold')
+        else:
+            ax.text(angles[i] + (angles[i + 1] - angles[i]) / 2, 1.1, str(i), ha='center', va='center', fontsize=10)
+
+    needle_angle = np.deg2rad(start_angle + ph_value * (end_angle - start_angle) / (num_sections - 1))
+    needle_line, = ax.plot([needle_angle, needle_angle], [0, 1], color='k', lw=3)
+
+    ax.text(np.deg2rad(start_angle) - 0.16, 1, 'Asam', ha='center', va='center', fontsize=10, fontweight='bold')
+    ax.text(np.deg2rad(end_angle) + 0.16, 1, 'Basa', ha='center', va='center', fontsize=10, fontweight='bold')
+    ax.text(0, 1.4, 'Netral', ha='center', va='center', fontsize=10, fontweight='bold')
+
+    ax.set_axis_off()
+
+    return fig, needle_line
+
+# Fungsi untuk memperbarui gauge
+def update_gauge(gauge_frame, needle_line):
+    global value  # Ambil nilai pH dari variabel global
+
+    # Hapus widget lama sebelum menggambar ulang
+    for widget in gauge_frame.winfo_children():
+        widget.destroy()
+    
+    # Update nilai angle untuk needle
+    needle_angle = np.deg2rad(-90 + value * (180 / 14))
+    needle_line.set_data([needle_angle, needle_angle], [0, 1])
+
+    # Gambar ulang canvas
+    gauge_canvas = FigureCanvasTkAgg(gauge_fig, master=gauge_frame)
+    gauge_canvas.draw()
+    gauge_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+# Fungsi untuk update otomatis setiap 1 detik
+def auto_update_gauge(gauge_frame, needle_line, delay=1000):
+    update_gauge(gauge_frame, needle_line)
+    gauge_frame.after(delay, auto_update_gauge, gauge_frame, needle_line, delay)
+
+def update_data():
+    global status
+    print (status)
+    
+    # Contoh data baru secara acak (bisa diganti dengan data real-time)
+    if valuefloat !=0 and status !=False:
+       new_date = time.strftime("%H:%M:%S")
+       new_ph = valuefloat
+       new_temp = voltage_value
+       new_humid = "-"
+       if valuefloat < 7:
+            new_category = "Asam"
+       elif valuefloat >= 7 and valuefloat <= 7.9:
+            new_category = "Netral"
+       else:
+         new_category = "Basa"
+    
+       data_list.append([new_date, new_ph, new_temp, new_humid, new_category])
+       # Menambahkan data baru ke Treeview
+       tree.insert('', tk.END, values=(new_date, new_ph, new_temp, new_humid, new_category))
+    
+       # Menghapus baris tertua jika data lebih dari 10 baris
+       if len(tree.get_children()) > 200:
+         tree.delete(tree.get_children()[0])
+    
+    # Memanggil fungsi ini lagi setelah 1 detik (1000 ms)
+      
+    frame.after(1000, update_data)
+
+def export_grafik_ph():
+    fig_ph = create_plot_ph()  # Membuat grafik pH
+    file_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                             filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"),
+                                                        ("SVG files", "*.svg")])
+    if file_path:
+        fig_ph.savefig(file_path, dpi=300)  # Menyimpan file dengan resolusi 300 dpi
+        print(f"Grafik pH berhasil disimpan di {file_path}")
+
+def export_grafik_voltage():
+    fig_voltage = create_plot_voltage()  # Membuat grafik pH
+    file_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                             filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"),
+                                                        ("SVG files", "*.svg")])
+    if file_path:
+        fig_voltage.savefig(file_path, dpi=300)  # Menyimpan file dengan resolusi 300 dpi
+        print(f"Grafik pH berhasil disimpan di {file_path}")
+
+def export_listview_excel():
+    file_path = filedialog.asksaveasfilename(defaultextension=".xlsx",
+                                             filetypes=[("Excel files", "*.xlsx")],
+                                             title="Simpan File Excel")
+
+    if file_path:
+        # Membuat DataFrame dari data_list
+        df = pd.DataFrame(data_list, columns=["Time", "pH", "Voltage", "Temperature", "Category"])
+        
+        # Menyimpan DataFrame ke file Excel
+        df.to_excel(file_path, index=False)
+        print(f"Data berhasil diekspor ke {file_path}")
+
+
+
+def show_logo():
+    # Memuat gambar dengan PIL
+    img = Image.open(resource_path("logoum.png"))  # Ganti dengan path gambar Anda
+    
+    # Mengubah ukuran gambar
+    img_resized = img.resize((120, 120))
+
+    # Menambahkan transparansi
+    img_resized = img_resized.convert("RGBA")
+    datas = img_resized.getdata()
+
+    # Mengatur transparansi
+    transparency_level = 150  # Contoh tingkat transparansi
+
+    new_data = []
+    for item in datas:
+        if item[3] != 0:  # Jika piksel tidak transparan
+            new_data.append((item[0], item[1], item[2], transparency_level))
+        else:
+            new_data.append(item)
+
+    img_resized.putdata(new_data)
+
+    # Mengubah gambar menjadi format yang bisa digunakan oleh Tkinter
+    img_tk = ImageTk.PhotoImage(img_resized)
+
+    # Mengatur ukuran canvas sesuai dengan ukuran gambar
+    logo_canvas.config(width=img_resized.width, height=img_resized.height)
+    
+    # Menampilkan gambar pada canvas di pixel tertentu
+    x_position = 0  # Ubah sesuai posisi yang diinginkan
+    y_position = 0  # Ubah sesuai posisi yang diinginkan
+    logo_canvas.create_image(x_position, y_position, anchor=tk.NW, image=img_tk)
+
+    # Menyimpan referensi gambar untuk mencegah garbage collection
+    logo_canvas.image = img_tk
+# Inisialisasi jendela utama
+root = tk.Tk()
+root.title("Katalis UM")
+root.geometry("1366x705")
+root.resizable(False, False)
+root.configure(bg="#101727")  # Background hitam
+
+# Canvas untuk menggambar elemen-elemen UI
+canvas = tk.Canvas(root, bg="#ffffff", highlightthickness=0)
+canvas.pack(fill="both", expand=True)
+
+# Frame terpisah untuk menampung grafik
+graph_frame_ph = tk.Frame(root, bg="#222222")
+graph_frame_ph.place(x=175, y=60, relwidth=0.4, relheight=0.4)
+
+# Frame terpisah untuk grafik voltage
+graph_frame_voltage = tk.Frame(root, bg="#222222")
+graph_frame_voltage.place(x=780, y=525, relwidth=0.43, relheight=0.24)
+
+# Frame untuk menampung pH gauge, adjusted to fully fill its area
+gauge_frame = tk.Frame(root, bg="#222222")
+gauge_frame.place(x=780, y=60, relwidth=0.4, relheight=0.4)
+
+
+canvas_frame = tk.Frame(root, bg='#2c2c54')
+canvas_frame.place(x=780, y=380, relwidth=0.4, relheight=0.18)
+
+#logo
+logo_canvas = tk.Canvas(root, bg="#172144", highlightthickness=0)
+logo_canvas.place(x=14, y=280, relwidth=0.09, relheight=0.18)
+# Fungsi untuk menggambar UI statis
+def draw_static_ui(width, height):
+    canvas.delete("all")  # Hapus semua elemen sebelumnya
+    sidebar_width = 150
+    header_height = 50
+
+    # Sidebar (kotak kiri tanpa rounded corners)
+    canvas.create_rectangle(0, 0, sidebar_width, height - 10, fill="#172144", outline="")
+
+    # Kotak besar pertama dibagi menjadi dua bagian
+    box1_top = header_height + 10
+    box1_bottom = height // 2 - 10
+    box1_left = sidebar_width + 10
+    box1_right = width - 10
+
+    # Bagian kiri dari kotak besar pertama
+    rounded_rectangle(canvas, box1_left, box1_top, (box1_left + box1_right) // 2 - 5, box1_bottom, radius=20, fill="#172144")
+    
+    # Bagian kanan dari kotak besar pertama
+    rounded_rectangle(canvas, (box1_left + box1_right) // 2 + 5, box1_top, box1_right, box1_bottom, radius=20, fill="#172144")
+
+    # Kotak besar kedua (kiri bawah dengan rounded corners)
+    rounded_rectangle(canvas, sidebar_width + 10, height // 2 + 10, width // 2 + 70, height - 10, radius=20, fill="#172144")
+    
+    # Kotak kecil pertama (kanan atas dengan rounded corners)
+    rounded_rectangle(canvas, width // 2 + 80, height // 2 + 10, width - 10, (height // 2 + height) // 2 - 10, radius=20, fill="#172144")
+
+    # Kotak kecil kedua (kanan bawah dengan rounded corners)
+    rounded_rectangle(canvas, width // 2 + 80, (height // 2 + height) // 2-5, width - 10, height - 10, radius=20, fill="#172144")
+
+fig_circle = plot_gauges(canvas_frame, values, labels, colors1, colors2)
+canvas_circle = FigureCanvasTkAgg(fig_circle, master=canvas_frame)
+canvas_circle.draw()
+canvas_circle.get_tk_widget().pack()
+
+# Buat grafik Matplotlib hanya sekali
+fig_ph = create_plot_ph()
+figure_canvas_ph = FigureCanvasTkAgg(fig_ph, master=graph_frame_ph)
+figure_canvas_ph.draw()
+figure_canvas_ph.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+# Membuat grafik voltage
+fig_voltage = create_plot_voltage()
+figure_canvas_voltage = FigureCanvasTkAgg(fig_voltage, master=graph_frame_voltage)
+figure_canvas_voltage.draw()
+figure_canvas_voltage.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+# Buat pH gauge hanya sekali
+gauge_fig, needle_line = plot_custom_ph_gauge(value)  # Memisahkan fig dan needle_line
+gauge_canvas = FigureCanvasTkAgg(gauge_fig, master=gauge_frame)  # Menggunakan fig saja
+gauge_canvas.draw()
+gauge_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+# Tampilkan teks
+label = tk.Label(root, text="Realtime Monitoring", font=("Arial", 10), bg="#172144", fg="white")
+label.place(x=780, y=366)  # Menentukan posisi x dan y
+
+title_label = tk.Label(root, text="Riwayat Pengukuran", font=("Arial", 12), bg="#172144", fg="white")
+title_label.place(x=178, y=369)
+
+subtitle_label = tk.Label(root, text="Data Log Sensor", font=("Arial", 10), bg="#172144", fg="white")
+subtitle_label.place(x=178, y=400)  # Atur posisi di bawah judul
+
+subtitles_label = tk.Label(root, text="Dashboard Monitoring pH", font=("Arial", 18), bg="#101727", fg="white")
+subtitles_label.place(x=640, y=10)  # Atur posisi di bawah judul
+
+subtitle1_label = tk.Label(root, text="Indikator pH", font=("Arial", 12), bg="#172144", fg="white")
+subtitle1_label.place(x=782, y=61)  # Atur posisi di bawah judul
+# Fungsi History
+frame = tk.Frame(root, bg='#172144')
+frame.place(x=178, y=440, width=550, height=250)  # Atur posisi dan ukuran frame
+
+# Membuat scrollbar untuk Treeview
+style = ttk.Style()
+
+# Ubah tema menjadi 'clam' agar style custom bisa diterapkan dengan baik
+style.theme_use("clam")
+
+# Ubah warna latar belakang, foreground, dan warna baris yang dipilih
+style.configure("Treeview", 
+                background="#172144",  # Warna latar belakang baris (dark blue)
+                fieldbackground="#172144",  # Warna latar belakang area data (dark blue)
+                foreground="white",  # Warna teks (putih)
+                rowheight=25,  # Tinggi baris
+                bordercolor="#172144",  # Ubah warna border
+                highlightthickness=0,  # Hilangkan border pada header
+                borderwidth=0)  # Hilangkan garis biru pada header
+
+# Mengubah warna baris yang dipilih
+style.map('Treeview', 
+          background=[('selected', '#00BFFF')],  # Warna biru muda saat dipilih
+          foreground=[('selected', 'white')])  # Warna teks saat dipilih
+
+scrollbar = tk.Scrollbar(frame)
+scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+# Membuat tabel menggunakan Treeview
+columns = ('date', 'ph', 'temperature', 'humidity', 'category')
+
+tree = ttk.Treeview(frame, columns=columns, show='headings', yscrollcommand=scrollbar.set, height=10)
+
+# Mengatur kolom
+tree.heading('date', text='Waktu')
+tree.heading('ph', text='PH')
+tree.heading('temperature', text='Voltage (V)')
+tree.heading('humidity', text='Temperature (°C)')
+tree.heading('category', text='Golongan')
+
+tree.column('date', width=120, anchor=tk.CENTER)
+tree.column('ph', width=50, anchor=tk.CENTER)
+tree.column('temperature', width=120, anchor=tk.CENTER)
+tree.column('humidity', width=100, anchor=tk.CENTER)
+tree.column('category', width=100, anchor=tk.CENTER)
+
+# Array data untuk setiap kolom
+
+# Menambahkan data ke dalam tabel menggunakan array
+for i in range(len(dates)):
+    tree.insert('', tk.END, values=(dates[i], ph_values[i], temperatures[i], humidities[i], categories[i]))
+
+tree.pack(fill=tk.BOTH, expand=True)
+
+# Menghubungkan scrollbar dengan Treeview
+scrollbar.config(command=tree.yview)
+
+# Menjalankan aplikasi
+def on_resize(event):
+    width = 1366
+    height = 705
+    # Sesuaikan ukuran UI dan tempatkan ulang grafik
+    draw_static_ui(width, height)
+menu_bar = Menu(root, bg='#444444', fg='white', activebackground='#5e5e5e', activeforeground='white')
+
+# Membuat menu "File"
+file_menu = Menu(menu_bar, tearoff=0, bg='#444444', fg='white', activebackground='#5e5e5e', activeforeground='white')
+
+# Menambahkan opsi ke dalam menu "File"
+file_menu.add_command(label="Export Grafik pH", command=export_grafik_ph)
+file_menu.add_separator()  # Menambahkan separator untuk jarak
+file_menu.add_command(label="Export Grafik Voltage", command=export_grafik_voltage)
+file_menu.add_separator()  # Menambahkan separator untuk jarak
+file_menu.add_command(label="Export Riwayat to Excel", command=export_listview_excel)
+
+# Menambahkan menu "File" ke menu utama
+menu_bar.add_cascade(label="File", menu=file_menu)
+
+update_data()
+
+update_plots()
+auto_update_gauge(gauge_frame, needle_line)
+simulate_update()
+# Bind event resize ke jendela utama
+root.bind("<Configure>", on_resize)
+data_queue = Queue()
+
+# Mulai thread untuk membaca data serial
+serial_thread = threading.Thread(target=read_serial_data, args=(data_queue,), daemon=True)
+serial_thread.start()
+
+# Memperbarui UI dari data serial
+update_ui_from_serial()
+
+root.config(menu=menu_bar)
+show_logo()
+# Label untuk memberikan kesan lebih modern
+
+# Menjalankan aplikasi
+root.mainloop()
